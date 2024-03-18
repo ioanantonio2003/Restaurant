@@ -48,6 +48,7 @@ public:
 
 class Restaurant{
 private:
+    static int m;
     std::string nume_restaurnat; //numele restaurantului
     int an_finantare;
     std::vector<Produs>meniu; //pt a folosi agregarea meniu va contine produse din clasa Produs
@@ -72,6 +73,7 @@ public:
 
     void adaugaProdus(const Produs& produs){ // adauga un produs in meniu
         meniu.push_back(produs);
+        incrementMax();
     }
 
     void stergeProdus(const Produs& produs){ // stergem un element specificat din meniu
@@ -89,7 +91,7 @@ public:
         out<<"Nume restaurant : "<<restaurant.nume_restaurnat<<std::endl;
         out<<"An finantare : "<<restaurant.an_finantare<<std::endl;
         out<<"Meniul : ";
-        for(auto i = 0; i < restaurant.meniu.size();i++){
+        for(int i = 0; i < m;i++){
             out<<restaurant.meniu[i].getNumeProdus()<<" ,";
         }
         std::cout<<std::endl;
@@ -108,7 +110,6 @@ public:
     Restaurant& operator+(const Restaurant& restaurant){//operator supraincarcat ca functie membra
         this->nume_restaurnat += restaurant.nume_restaurnat;
         this->an_finantare = restaurant.an_finantare;
-        std::vector<Produs>m;
         this->meniu.insert(this->meniu.end(),restaurant.meniu.begin(),restaurant.meniu.end());
         return *this;
     }
@@ -177,7 +178,13 @@ public:
             i++;
         }
     }
+
+    static void incrementMax() {
+        m++;
+    }
 };
+int Restaurant::m = 0;
+
 Restaurant operator-(const Restaurant& res1, int nr){//operator supraincarcat ca functie non-membra
     return Restaurant(res1.getNumeRestaurnat(),res1.getAnFinantare() - nr);
 }
