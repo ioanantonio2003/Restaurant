@@ -89,7 +89,7 @@ public:
         out<<"Nume restaurant : "<<restaurant.nume_restaurnat<<std::endl;
         out<<"An finantare : "<<restaurant.an_finantare<<std::endl;
         out<<"Meniul : ";
-        for(int i = 0; i < restaurant.meniu.size();i++){
+        for(auto i = 0; i < restaurant.meniu.size();i++){
             out<<restaurant.meniu[i].getNumeProdus()<<" ,";
         }
         std::cout<<std::endl;
@@ -220,6 +220,7 @@ void prelucrare_restaurant(){
 
 int main() {
     std::vector<Restaurant>restaurante;
+    int size = 0;
     int choice;
     bool display_menu = true;
     while (display_menu) {
@@ -245,13 +246,14 @@ int main() {
                 Restaurant res;
                 std::cin>>res;
                 restaurante.push_back(res);
+                size = size + 1;
                 break;
             }
             case 3 : {
                 std::cout<<"Alege nr restaurantului pe care vrei sa l modifici:";
                 int c;
                 std::cin>>c;
-                if(c>=restaurante.size()){
+                if(c>=size){
                     break;
                 }
                 bool t = true;
@@ -284,7 +286,7 @@ int main() {
                 std::cout<<"Alege nr restaurantului pe care vrei sa l modifici:";
                 int c;
                 std::cin>>c;
-                if(c>=restaurante.size()){
+                if(c>=size){
                     break;
                 }
                 bool b = true;
