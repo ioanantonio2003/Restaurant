@@ -91,7 +91,7 @@ public:
         out<<"Nume restaurant : "<<restaurant.nume_restaurnat<<std::endl;
         out<<"An finantare : "<<restaurant.an_finantare<<std::endl;
         out<<"Meniul : ";
-        for(int i = 0; i < m;i++){
+        for(int i = 0; i < restaurant.meniu.size(); i++){
             out<<restaurant.meniu[i].getNumeProdus()<<" ,";
         }
         std::cout<<std::endl;
