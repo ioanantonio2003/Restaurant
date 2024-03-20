@@ -1,166 +1,415 @@
-cmake_minimum_required(VERSION 3.24)
+name: C++ CI
 
-# NOTE: update executable name in .github/workflows/cmake.yml:25 when changing executable name in this file
-# for now, the project name is used as the executable name
-project(oop)
+on:
+  push:
+    branches: ['*'] # NOTE: replace/update with appropriate branch name(s)
+    tags: ['*']
+  pull_request:
+    branches: ['*'] # NOTE: replace/update with appropriate branch name(s)
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: Build type
+        required: false
+        default: 'Debug'
+        type: choice
+        options:
+          - Debug
+          - Release
+          - RelWithDebInfo
+          - MinSizeRel
 
-set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+env:
+  BUILD_TYPE: ${{ inputs.build_type || 'Debug' }}
+  # NOTE: update executable name if it is changed in CMakeLists.txt
+  EXECUTABLE_NAME: "oop"
+  INPUT_FILENAME: "tastatura.txt"
+  BUILD_DIR: "build"
+  EXT_DIR: "ext"
+  BIN_DIR: "bin"
 
-# You aren't supposed to be using this, but convenience...
-file(GLOB_RECURSE SOURCES RELATIVE ${CMAKE_SOURCE_DIR} "src/*")
-file(GLOB_RECURSE HEADERS RELATIVE ${CMAKE_SOURCE_DIR} "include/*")
-file(GLOB_RECURSE TESTS RELATIVE ${CMAKE_SOURCE_DIR} "test/*.cpp")
-include_directories(include)
-include_directories(src)
+defaults:
+  run:
+    # Use a bash shell, so we can use the same syntax for environment variable
+    # access regardless of the host operating system
+    # https://github.com/saxbophone/CPP20-Cross-Platform-Template
+    shell: bash
 
-option(WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
+jobs:
+  cppcheck:
+    name: "Cppcheck"
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
-  set(CMAKE_INSTALL_PREFIX "install_dir" CACHE PATH "..." FORCE)
-endif()
+      - name: Install cppcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends cppcheck
 
-# disable sanitizers when releasing executables without explicitly requested debug info
-# use generator expressions to set flags correctly in both single and multi config generators
-set(is_debug "$<CONFIG:Debug>")
-set(is_rel_with_deb "$<CONFIG:RelWithDebInfo>")
-set(debug_mode "$<OR:${is_debug},${is_rel_with_deb}>")
+      # The flag CMAKE_EXPORT_COMPILE_COMMANDS generates compile_commands.json
+      # which is used by cppcheck and clang-tidy
+      - name: Configure CMake
+        uses: ./.github/actions/configure-cmake
+        with:
+          custom_flags: '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON'
 
-###############################################################################
+      - name: Cppcheck
+        run: |
+          cppcheck --enable=all \
+                   --inline-suppr \
+                   --project="${BUILD_DIR}"/compile_commands.json \
+                   -i"${BUILD_DIR}" --suppress='*:"${BUILD_DIR}"/*' \
+                   -i"${EXT_DIR}" --suppress='*:"${EXT_DIR}"/*' \
+                   --suppress=missingIncludeSystem \
+                   --suppress=unmatchedSuppression \
+                   --suppress=useStlAlgorithm \
+                   -itest/* \
+                   -isrc/example.cpp \
+                   --error-exitcode=1
 
-# custom functions
+  clang-tidy:
+    name: "Clang-Tidy"
+    runs-on: ubuntu-22.04
+    env:
+      CLANG_VER: 17
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-function(set_custom_stdlib_and_sanitizers target add_apple_asan)
-    if(MSVC)
-        # see https://gitlab.kitware.com/cmake/cmake/-/issues/24922
-        set_target_properties(${target} PROPERTIES VS_USER_PROPS "${CMAKE_SOURCE_DIR}/disable_modules.props")
-        target_compile_options(${target} PRIVATE /experimental:module-)
-        # if(GITHUB_ACTIONS)
-        target_compile_options(${target} PRIVATE "$<${debug_mode}:/fsanitize=address>")
-        # endif()
-        return()
-    endif()
+      - name: Setup compiler env vars
+        run: |
+          echo "CC=clang-${CLANG_VER}" >> $GITHUB_ENV
+          echo "CXX=clang++-${CLANG_VER}" >> $GITHUB_ENV
 
-    if("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
-        target_compile_options(${target} PRIVATE -stdlib=libc++)
-        target_link_options(${target} PRIVATE -stdlib=libc++)
-    endif()
+      # Also see https://github.com/actions/runner-images/discussions/9446#discussioncomment-8668538
+      - name: Install Clang ${{ env.CLANG_VER }}
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x ./llvm.sh
+          sudo ./llvm.sh ${CLANG_VER}
 
-    if(APPLE)
-        # first check Apple since Apple is also a kind of Unix
-        if("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang" AND add_apple_asan MATCHES true)
-            target_compile_options(${target} PRIVATE "$<${debug_mode}:-fsanitize=address,undefined>")
-            target_link_options(${target} PRIVATE "$<${debug_mode}:-fsanitize=address,undefined>")
-        endif()
-    elseif(UNIX)
-        if("${CMAKE_CXX_COMPILER_ID}" MATCHES "GNU")
-            if("${CMAKE_CXX_COMPILER_VERSION}" MATCHES "12.")
-                # check leaks on Linux since macOS does not support the leaks sanitizer yet
-                # leaks sanitizer is enabled by default on Linux, so we do not need to enable it explicitly
-                target_compile_options(${target} PRIVATE "$<${debug_mode}:-fsanitize=address,undefined>")
-                target_link_options(${target} PRIVATE "$<${debug_mode}:-fsanitize=address,undefined>")
-            endif()
-        elseif("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
-            if("${CMAKE_CXX_COMPILER_VERSION}" MATCHES "17.")
-                # use semi-colons instead of spaces to separate arguments
-                # it is recommended to quote generator expressions in order to avoid unintentional splitting
-                target_compile_options(${target} PRIVATE "$<${debug_mode}:-fsanitize=memory,undefined;-fsanitize-recover=memory,undefined;-fsanitize-memory-track-origins>")
-                target_link_options(${target} PRIVATE "$<${debug_mode}:-fsanitize=memory,undefined;-fsanitize-recover=memory,undefined;-fsanitize-memory-track-origins;-Wl,-rpath,tools/llvm-project/build/lib>")
-            else()
-                message("No matching Clang version to add sanitizer flags!")
-            endif()
-        endif()
-    endif()
-endfunction()
+      - name: Install clang-tidy
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends clang-tidy-${{ env.CLANG_VER }} libc++-${{ env.CLANG_VER }}-dev libc++abi-${{ env.CLANG_VER }}-dev
 
-###############################################################################
+      - name: Configure CMake
+        uses: ./.github/actions/configure-cmake
+        with:
+          custom_flags: '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON'
 
-# external dependencies with FetchContent
-include(FetchContent)
-#
-# NOTE: Also update env vars used for caching in
-#         - .github/actions/configure-cmake/action.yml
-#         - .github/workflows/cmake.yml
- FetchContent_Declare(
-         googletest
-         URL https://github.com/google/googletest/archive/03597a01ee50ed33e9dfd640b249b4be3799d395.zip
- )
-#
-FetchContent_MakeAvailable(googletest)
+      - name: Clang-Tidy
+        continue-on-error: true
+        # clang-tidy is not able to follow symbolic links: https://bugs.llvm.org/show_bug.cgi?id=47460
+        # need to use | as sed separator because / is used in paths
+        run: |
+          sed -i "s|$(which ${CXX})|$(realpath $(which ${CXX}))|g" "${BUILD_DIR}"/compile_commands.json
 
-###############################################################################
+          cat "${BUILD_DIR}"/compile_commands.json |
+            jq -r '.[] | .file' |                    # select source file paths from CMake project; -r to strip quotes
+            grep -v "/${BUILD_DIR}/_deps/" |         # ignore external dependencies
+            xargs clang-tidy-${{ env.CLANG_VER }} -p "${BUILD_DIR}"
 
-# external dependencies with find_package
 
-# find_package(Threads REQUIRED)
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
 
-###############################################################################
+    env:
+      CC: ${{ matrix.c }}
+      CXX: ${{ matrix.cxx }}
 
-# NOTE: update executable name in .github/workflows/cmake.yml:25 when changing name here
-add_executable(${PROJECT_NAME} main.cpp ${SOURCES})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            c: clang-17
+            cxx: clang++-17
+            clang_ver: "17"
+            clang_ver_full: "17.0.6"
+            name: "MSan: Ubuntu 22.04 Clang 17"
+            cmake_flags: "-DUSE_MSAN=ON"
+            cmake_generator: Ninja
+            # This env runs memory sanitizers
+            runs_msan: true
 
-###############################################################################
+          - os: ubuntu-22.04
+            c: gcc-12
+            cxx: g++-12
+            name: "ASan: Ubuntu 22.04 GCC 12"
+            cmake_flags: "-DUSE_ASAN=ON"
+            cmake_generator: Ninja
+            # This env runs address sanitizers
+            runs_asan: true
 
-# target definitions
+          - os: ubuntu-22.04
+            c: gcc-11
+            cxx: g++-11
+            name: "Valgrind: Ubuntu 22.04 GCC 11"
+            # cmake_flags:
+            cmake_generator: Ninja
+            # This env runs valgrind
+            runs_valgrind: true
 
-if(GITHUB_ACTIONS)
-  message("NOTE: GITHUB_ACTIONS defined")
-  target_compile_definitions(${PROJECT_NAME} PRIVATE GITHUB_ACTIONS)
-endif()
+          - os: macos-12
+            c: clang
+            cxx: clang++
+            name: "ASan: macOS 12 Apple Clang 14"
+            cmake_flags: "-DUSE_ASAN=ON"
+            # cmake_generator:
+            # This env runs address sanitizers
+            runs_asan: true
 
-###############################################################################
+          - os: macos-12
+            c: gcc-12
+            cxx: g++-12
+            name: "macOS 12 GCC 12"
+            # cmake_flags:
+            # cmake_generator: Ninja
 
-if(WARNINGS_AS_ERRORS)
-    set_property(TARGET ${PROJECT_NAME} PROPERTY COMPILE_WARNING_AS_ERROR ON)
-endif()
+          - os: windows-2022
+            c: cl
+            cxx: cl
+            name: "ASan: Windows 2022 MSVC 19.38"
+            cmake_flags: "-DUSE_ASAN=ON"
+            # cmake_generator: Ninja
+            # This env runs address sanitizers
+            runs_asan: true
 
-# custom compiler flags
-message("Compiler: ${CMAKE_CXX_COMPILER_ID} version ${CMAKE_CXX_COMPILER_VERSION}")
-if(MSVC)
-    target_compile_options(${PROJECT_NAME} PRIVATE /W4 /permissive- /wd4244 /wd4267 /wd4996 /external:anglebrackets /external:W0)
-else()
-    target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -pedantic)
-endif()
+          - os: windows-2022
+            c: gcc
+            cxx: g++
+            name: "Windows 2022 MinGW GCC 12"
+            # cmake_flags:
+            cmake_generator: Ninja
 
-###############################################################################
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-# sanitizers
-set_custom_stdlib_and_sanitizers(${PROJECT_NAME} true)
+      - name: Prepare env
+        run: |
+          echo ${GITHUB_WORKSPACE}
+          mkdir ${GITHUB_WORKSPACE}/artifacts
 
-###############################################################################
+      - name: Set timestamp and zip name
+        run: |
+          echo "TIMESTAMP=$(date +%Y-%m-%d-%H-%M-%S)" >> ${GITHUB_ENV}
 
-# use SYSTEM so cppcheck/clang-tidy does not report warnings from these directories
-# target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE ext/<SomeHppLib>/include)
-# target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE ${<SomeLib>_SOURCE_DIR}/include)
-# target_link_directories(${PROJECT_NAME} PRIVATE ${<SomeLib>_BINARY_DIR}/lib)
-# target_link_libraries(${PROJECT_NAME} <SomeLib>)
+          # use the full name as prefix: {user_name}_{repo_name} (replace / with _)
+          echo "ZIP_NAME=$(echo "${GITHUB_REPOSITORY}_${{ env.BUILD_TYPE }}_${{ matrix.os }}_${{ matrix.cxx }}" | sed 's|/|_|')" >> ${GITHUB_ENV}
 
-###############################################################################
+          # or use only the repo name (github does not have a predefined environment variable for this)
+          # the regex splits by / and keeps everything after / without the / character
+          # echo "ZIP_NAME=$(echo "${GITHUB_REPOSITORY}_${{ env.BUILD_TYPE }}_${{ matrix.os }}_${{ matrix.cxx }}" | sed -E 's|.+/(.+)|\1|')" >> ${GITHUB_ENV}
 
-# copy binaries to "bin" folder; these are uploaded as artifacts on each release
-# update name in .github/workflows/cmake.yml:29 when changing "bin" name here
-install(TARGETS ${PROJECT_NAME} DESTINATION bin)
-# install(DIRECTORY some_dir1 some_dir2 DESTINATION bin)
-# install(FILES some_file1.txt some_file2.md DESTINATION bin)
-if(APPLE)
-    install(FILES launcher.command DESTINATION bin)
-endif()
+      # Common Linux dependencies
+      - name: Install Linux Dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install ninja-build
+          # https://github.com/llvm/llvm-project/issues/78354
+          sudo sysctl vm.mmap_rnd_bits=28
 
-###############################################################################
-enable_testing()
+      # Also see https://github.com/actions/runner-images/discussions/9446#discussioncomment-8668538
+      - name: Install Clang ${{ matrix.clang_ver }}
+        if: runner.os == 'Linux' && matrix.runs_msan == true
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x ./llvm.sh
+          sudo ./llvm.sh ${{ matrix.clang_ver }}
 
-add_executable(
-        test_oop
-        ${HEADERS}
-        ${TESTS}
-        ${SOURCES}
-)
+      - name: Install libc++ (Linux Clang ${{ matrix.clang_ver }})
+        if: runner.os == 'Linux' && matrix.runs_msan == true
+        run: |
+          # sudo apt-get update
+          sudo apt-get install --no-install-recommends libc++-${{ matrix.clang_ver }}-dev libc++abi-${{ matrix.clang_ver }}-dev
 
-target_link_libraries(
-        test_oop
-        GTest::gtest_main
-)
+      - name: Install ninja (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install ninja
 
-include(GoogleTest)
-gtest_discover_tests(test_oop)
+      - name: Install valgrind
+        if: runner.os == 'Linux' && matrix.runs_valgrind == true
+        run: |
+          # sudo apt-get update
+          sudo apt-get install --no-install-recommends valgrind
+
+      - name: Cache tools
+        uses: actions/cache@v4
+        if: runner.os == 'Linux' && matrix.runs_msan == true
+        id: cache-tools
+        with:
+          path: tools
+          key: tools-clang-${{ matrix.clang_ver }}-stdlib-msan
+
+      - name: Configure CMake
+        uses: ./.github/actions/configure-cmake
+        with:
+          custom_flags: ${{ matrix.cmake_flags }}
+          warnings_as_errors: 'ON'
+
+      - name: Build
+        # Execute the build using N jobs (-jN)
+        run: cmake --build "${BUILD_DIR}" --config ${BUILD_TYPE} -j6
+
+      - name: Test
+        # Run tests
+        run: cd "${BUILD_DIR}" && ctest
+
+      - name: Install
+        # Use CMake to "install" build artifacts (only interested in CMake registered targets) to our custom artifacts directory
+        run: cmake --install "${BUILD_DIR}" --config ${BUILD_TYPE} --prefix artifacts
+
+      - name: Move artifacts
+        run: |
+          mkdir ${{ env.ZIP_NAME }}
+          mv artifacts/${{ env.BIN_DIR }}/* ${{ env.ZIP_NAME }}
+          ls -la ${{ env.ZIP_NAME }}
+          cp "${INPUT_FILENAME}" ${{ env.ZIP_NAME }}
+
+      - name: Patch macOS launcher
+        if: runner.os == 'macOS'
+        run: |
+          sed -i '' -e "s/oop/${EXECUTABLE_NAME}/" "${{ env.ZIP_NAME }}/launcher.command"
+          chmod +x "${{ env.ZIP_NAME }}/launcher.command"
+
+      - name: Copy missing dylibs
+        if: runner.os == 'macOS' && matrix.cxx == 'clang++'
+        run: |
+          mkdir lib
+          cp /Library/Developer/CommandLineTools/usr/lib/clang/14.0.0/lib/darwin/libclang_rt.asan_osx_dynamic.dylib lib
+          install_name_tool -change @rpath/libclang_rt.asan_osx_dynamic.dylib @executable_path/lib/libclang_rt.asan_osx_dynamic.dylib ${{ env.ZIP_NAME }}/${{ env.EXECUTABLE_NAME }}
+          mv lib ${{ env.ZIP_NAME }}/
+
+      - name: Copy missing dylibs (g++)
+        if: runner.os == 'macOS' && startsWith(matrix.cxx, 'g++')
+        run: |
+          mkdir lib
+          cp /usr/local/opt/gcc@12/lib/gcc/12/libstdc++.6.dylib /usr/local/opt/gcc@12/lib/gcc/12/libgcc_s.1.1.dylib lib
+          install_name_tool -change /usr/local/opt/gcc@12/lib/gcc/12/libstdc++.6.dylib @executable_path/lib/libstdc++.6.dylib ${{ env.ZIP_NAME }}/${{ env.EXECUTABLE_NAME }}
+          install_name_tool -change /usr/local/opt/gcc@12/lib/gcc/12/libgcc_s.1.1.dylib @executable_path/lib/libgcc_s.1.1.dylib ${{ env.ZIP_NAME }}/${{ env.EXECUTABLE_NAME }}
+          mv lib ${{ env.ZIP_NAME }}/
+
+      - name: Copy missing dlls
+        if: runner.os == 'Windows' && matrix.cxx == 'cl'
+        run: |
+          if [[ "${BUILD_TYPE}" =~ "Deb" ]]; then
+            # runtime debug DLLs
+            cp "$(which ucrtbased.dll)" \
+               "$(which VCRUNTIME140_1D.dll)" \
+               "$(which MSVCP140D.dll)" \
+               "$(which VCRUNTIME140D.dll)" \
+               ${GITHUB_WORKSPACE}/${{ env.ZIP_NAME }}
+
+            # sanitizers DLLs
+            vcver=$(cat "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt")
+            vcbindir="C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Tools/MSVC/${vcver}/bin/Hostx64/x64/"
+            cp "${vcbindir}/clang_rt.asan_dynamic-x86_64.dll" \
+               "${vcbindir}/clang_rt.asan_dbg_dynamic-x86_64.dll" \
+               ${GITHUB_WORKSPACE}/${{ env.ZIP_NAME }}
+          fi
+
+          # runtime release DLLs
+          if [[ "${BUILD_TYPE}" =~ "Rel" ]]; then
+            cp "$(which ucrtbase.dll)" \
+               "$(which VCRUNTIME140_1.dll)" \
+               "$(which MSVCP140.dll)" \
+               "$(which VCRUNTIME140.dll)" \
+               ${GITHUB_WORKSPACE}/${{ env.ZIP_NAME }}
+          fi
+
+      - name: Copy stdlib (MinGW)
+        if: runner.os == 'Windows' && matrix.cxx == 'g++'
+        # static linking might not work with MinGW, might be easier this way
+        run: |
+          cp $(which libstdc++-6.dll) \
+            $(which libgcc_s_seh-1.dll) \
+            $(which libwinpthread-1.dll) \
+            ${GITHUB_WORKSPACE}/${{ env.ZIP_NAME }}
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}_${{ env.TIMESTAMP }}
+          path: ${{ env.ZIP_NAME }}
+          retention-days: 30
+
+      - name: Setup memory sanitizer
+        if: runner.os == 'Linux' && matrix.runs_msan == true && steps.cache-tools.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p tools
+          cd tools
+          git clone --depth=1 --branch=llvmorg-${{ matrix.clang_ver_full }} https://github.com/llvm/llvm-project
+          cd llvm-project
+          # mkdir build; cd build
+          sudo ln -s -f /usr/bin/$CC /usr/bin/clang
+          sudo ln -s -f /usr/bin/$CXX /usr/bin/clang++
+          # https://github.com/llvm/llvm-project/issues/78354
+          sudo sysctl vm.mmap_rnd_bits=28
+          cmake -G Ninja -S runtimes -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DLLVM_USE_SANITIZER=MemoryWithOrigins \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=true
+          cmake --build build -j6 -- cxx cxxabi
+
+      - name: Sanitizers
+        # run one sanitizer for each env to avoid building extra binaries on one env
+        if: (matrix.runs_asan == true || matrix.runs_msan == true) && runner.os != 'Windows'
+        # detect_leaks is not supported on macOS
+        # env:
+        #   ASAN_OPTIONS: detect_leaks=1
+        run: |
+          cat "${INPUT_FILENAME}" | tr -d '\r' | ./${{ env.ZIP_NAME }}/"${EXECUTABLE_NAME}"
+
+      - name: Sanitizers (Windows MSVC)
+        # run one sanitizer for each OS to avoid building extra binaries
+        if: matrix.cxx == 'cl' && matrix.runs_asan == true
+        continue-on-error: true
+        run: |
+          cat "${INPUT_FILENAME}" | ./${{ env.ZIP_NAME }}/"${EXECUTABLE_NAME}".exe
+
+      - name: Valgrind
+        if: runner.os == 'Linux' && matrix.runs_valgrind == true
+        run: |
+          # remove --show-leak-kinds=all (and --track-origins=yes) if there are many leaks in external libs
+          cat "${INPUT_FILENAME}" | tr -d '\r' | valgrind \
+              --leak-check=full --show-leak-kinds=all --track-origins=yes \
+              --error-exitcode=1 \
+              ./${{ env.ZIP_NAME }}/"${EXECUTABLE_NAME}"
+
+      - name: Set Tag Name
+        if: startsWith(github.ref, 'refs/tags/')
+        # trim prefix from ref to get tag name
+        run: echo "TAG_NAME=${GITHUB_REF#'refs/tags/'}" >> ${GITHUB_ENV}
+
+      - name: Add tag to folder name
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          mv ${{ env.ZIP_NAME }} ${{ env.ZIP_NAME }}_${{ env.TAG_NAME }}
+
+      - name: Archive Release
+        uses: thedoctor0/zip-release@master
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          type: 'zip'
+          path: ${{ env.ZIP_NAME }}_${{ env.TAG_NAME }}
+          filename: ${{ env.ZIP_NAME }}_${{ env.TAG_NAME }}.zip
+
+      - name: Release
+        uses: softprops/action-gh-release@master
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            ${{ env.ZIP_NAME }}_${{ env.TAG_NAME }}.zip
